@@ -35,19 +35,35 @@ def verify_source(path, pin):
         raise ValueError(f"source must be pristine: {path}")
 
 
-def verify_stove(stove, release="16.2.0-open3"):
-    receipt = json.loads((stove / "provenance.json").read_text())
-    expected = {"16.2.0-open2": OPEN2, "16.2.0-open3": OPEN3}[release]
-    if receipt["release"] != release or receipt["archive_sha256"] != expected:
-        raise ValueError(f"Use scripts/stage_open2_stove.py --release {release} to stage the approved archive")
-    files = receipt["compiler_runtime_sha256"]
-    if "bin/m68k-amigaos-g++" not in files or len(files) < 100:
-        raise ValueError("Incomplete compiler/runtime receipt")
-    for name, expected in files.items():
-        path = (stove / "prefix" / name).resolve()
-        if not path.is_relative_to((stove / "prefix").resolve()) or digest(path) != expected:
-            raise ValueError(f"compiler/runtime changed: {name}")
-    return receipt
+def verify_stove(stove, release=None):
+    """Records which compiler this stove has; refuses no stove (BL-144). The release is the one
+    the compiler's own --version names, else the one provenance.json or STOVE.json names. The
+    archive is the one they name, else None. `release` is kept for old callers and ignored.
+    Fails only when the stove has no compiler."""
+    stove = Path(stove)
+    gxx = stove / "prefix/bin/m68k-amigaos-g++"
+    if not gxx.is_file():
+        raise ValueError(f"no compiler in the stove: {gxx}")
+    try:
+        line = (run([gxx, "--version"]).splitlines() or ["unknown"])[0]
+    except (OSError, subprocess.SubprocessError):
+        line = "unknown"
+    named = archive = None
+    for name in ("provenance.json", "STOVE.json"):
+        try:
+            data = json.loads((stove / name).read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if named is None and isinstance(data.get("release"), str):
+            named = data["release"]
+        sha = data.get("archive_sha256") or (data.get("compilerArchive") or {}).get("sha256")
+        if archive is None and isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{64}", sha):
+            archive = sha
+    m = re.search(r"16\.2\.0-open\d+", line) or re.search(r"16\.2\.0-open\d+", named or "")
+    return {"release": m.group(0) if m else (named or line), "archive_sha256": archive,
+            "compiler": line, "source": "recorded"}
 
 
 def expand(arg, port_dir):
